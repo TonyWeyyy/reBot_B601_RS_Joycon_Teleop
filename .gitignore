@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+.deps/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+logs/
+config/home_candidate.yaml
+config/*.bak

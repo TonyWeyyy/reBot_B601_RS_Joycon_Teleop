@@ -1,0 +1,9 @@
+numpy>=1.26,<3
+scipy>=1.12
+PyYAML>=6.0
+mujoco>=3.1
+pynput>=1.7; platform_system == "Linux"
+evdev>=1.7; platform_system == "Linux"
+motorbridge>=0.1
+# Joy-Con 体感输入另需安装：https://github.com/box2ai-robotics/joycon-robotics
+# LeRobot 数据采集／训练依赖见 learning/README.md。

@@ -1,0 +1,92 @@
+arm:
+  # auto 优先 MIT；兼容 rebot_control 与 rebot 包导出的控制器，缺失时回退 POS_VEL。
+  # 当前 rebot_control 仓库包名为 rebot，因此 rebot_sdk_path 应指向该仓库根目录。
+  backend: auto
+  rebot_sdk_path: "/home/tony/wey/rebot_developer/rebot_control"
+  sdk_path: "/home/tony/wey/rebot_developer/reBotArm_control_py"
+  hardware_yaml: config/rebotarm_rs.yaml
+  urdf: URDF/RS/urdf/ReBot_Arm_RS_simple.urdf
+  end_effector_frame: gripper_end
+  control_rate_hz: 30.0
+  real_arm_confirmation: true
+
+safety:
+  # 软件限位为官方 URDF／电机限位的 70%，不是 SDK 自带功能。
+  joint_limit_scale: 0.7
+  # 夹爪第 7 路电机角度范围（rad），端点随夹爪型号/零位变化；首次真机必须空载确认开合方向。
+  # 修改后同时检查 home.gripper 是否落在该范围内。
+  gripper_limits_rad: [-6.021385919, 0.0]
+  max_joint_velocity_rad_s: [0.35, 0.35, 0.35, 0.45, 0.45, 0.55, 1.20]
+  max_joint_acceleration_rad_s2: [1.2, 1.2, 1.2, 1.8, 1.8, 2.0, 5.0]
+  # 以肩关节中心 (0, 0, 0.145) 为圆心的安全工作空间（B601-RS 实际肩到末端展长约 0.83 m，默认取约 70%）。
+  workspace_origin_xyz: [0.0, 0.0, 0.145]
+  workspace_radius_m: 0.58
+  workspace_min_z_m: 0.04
+  workspace_max_z_m: 0.65
+  workspace_min_reach_m: 0.10
+  # 笛卡尔跟踪最大超前量，避免低速（如 --max-vel 0.05）下目标甩开机械臂导致 IK 拒解死锁。
+  max_cartesian_lead_m: 0.04
+  max_cartesian_lead_rad: 0.25
+  input_watchdog_s: 0.25
+  startup_guard_s: 1.0
+  require_deadman: true
+  require_imu_heartbeat: true
+  temperature_warn_c: 75.0
+  temperature_trip_c: 80.0
+  gripper_torque_trip_nm: 1.0
+  # 安全反馈缺失不再静默放行；调试时只能在本机覆盖配置中显式放宽。
+  feedback_timeout_s: 0.5
+  action_watchdog_s: 0.5
+  feedback_grace_s: 5.0
+  require_feedback_timestamp: false
+  require_gripper_torque_feedback: true
+  require_temperature_feedback: true
+  home_timeout_s: 15.0
+  # 六轴与夹爪分开设定到位容差：六轴适应 MIT PD 重力静差，夹爪行程 345° 容差更合理。
+  home_tolerance_rad: 0.04
+  gripper_home_tolerance_rad: 0.15
+
+home:
+  # RS 模型坐标（rad），对应 [0°, 50°, 40°, 10°, 0°, 0°]：
+  # 末端水平向前（rpy=[0,0,0]），TCP=[0.395, 0.000, 0.358] m，六轴距软限位余量均 ≥ 40°。
+  q: [0.0, 0.872665, 0.698132, 0.174533, 0.0, 0.0]
+  gripper: 0.0
+
+joycon:
+  device: right
+  map: config/joycon_map.json
+  # 摇杆平移速度（m/s）与 X/B 纯 Z 轴升降速度（m/s）。
+  linear_speed_m_s: 0.14
+  vertical_speed_m_s: 0.10
+  stick_deadzone: 0.15
+  position_scale: 1.0
+  rotation_scale: 1.0
+  gripper_travel_time_s: 1.0
+  # 摇杆 XY 符号 [前/后(+X), 左/右(+Y)]；手感反向时可单独改 -1.0。
+  stick_axis_signs: [1.0, 1.0]
+  # 体感姿态三轴符号 [roll, pitch, yaw]；已按右手法则对齐机器人坐标系，可按习惯微调。
+  imu_axis_signs: [1.0, 1.0, 1.0]
+  # 航向缩放，避免腕部过早顶到行程边界。
+  imu_yaw_scale: 0.8
+  # 静止时忽略微小陀螺读数，抑制 yaw 缓慢漂移。
+  imu_gyro_deadband_rad_s: 0.03
+  # 互补滤波加速度修正权重与低通平滑系数。
+  imu_lowpass_alpha: 0.20
+  # SO(3) 姿态目标最大变化率（rad/s），防止 IMU 跳变让腕部猛转。
+  imu_max_rate_rad_s: 1.5
+  # 长按 Home 键退出所需秒数（防止误触）；按住 R + 按下摇杆仍为立即安全停止。
+  exit_hold_s: 0.6
+
+keyboard:
+  # 真机需同时按住 Space；数字 0 安全回 HOME，Esc 安全回零并退出。
+  deadman_key: space
+
+simulation:
+  headless: false
+  duration_s: null
+  # 可视化模型；留空时优先官方 SDK 完整 URDF，失败回退轻量彩色模型。
+  # 当前指向本机 RS 数字孪生 MuJoCo 场景（含网格、灯光、桌面）；路径不存在会自动回退。
+  urdf: "/home/tony/wey/rebot_developer/ReBot_Arm_DigitalTwin_RS/rebotarm_ros2_RS/src/rebotarm_mujoco_rs/models/rs_grasp_scene.xml"
+
+logging:
+  directory: logs

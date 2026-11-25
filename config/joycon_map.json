@@ -1,0 +1,12 @@
+{
+  "deadman": "r",
+  "z_up": "x",
+  "z_down": "b",
+  "gripper": "zr",
+  "home": "plus",
+  "exit": "home",
+  "estop": "r_stick",
+  "episode_end": "a",
+  "episode_retry": "y",
+  "startup_guard_s": 1.0
+}
