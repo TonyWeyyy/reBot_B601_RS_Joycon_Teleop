@@ -24,9 +24,9 @@ safety:
   workspace_min_z_m: 0.04
   workspace_max_z_m: 0.65
   workspace_min_reach_m: 0.10
-  # 笛卡尔跟踪最大超前量，避免低速（如 --max-vel 0.05/0.10）下目标甩开机械臂导致反向延迟或 IK 死锁。
+  # 笛卡尔跟踪最大超前量，避免低速（如 --max-vel 0.05/0.10）下目标甩开机械臂导致 IK 死锁。
   max_cartesian_lead_m: 0.04
-  max_cartesian_lead_rad: 0.15
+  max_cartesian_lead_rad: 0.25
   input_watchdog_s: 0.40
   startup_guard_s: 1.0
   require_deadman: true
@@ -58,7 +58,7 @@ joycon:
   # 摇杆平移速度（m/s）与 X/B 纯 Z 轴升降速度（m/s）。
   linear_speed_m_s: 0.14
   vertical_speed_m_s: 0.10
-  stick_deadzone: 0.15
+  stick_deadzone: 0.18
   position_scale: 1.0
   rotation_scale: 1.0
   gripper_travel_time_s: 1.0
@@ -68,8 +68,8 @@ joycon:
   imu_axis_signs: [1.0, 1.0, 1.0]
   # 航向缩放，避免腕部过早顶到行程边界。
   imu_yaw_scale: 0.8
-  # 静止时忽略微小陀螺读数，抑制 yaw 缓慢漂移。
-  imu_gyro_deadband_rad_s: 0.03
+  # 静止时忽略微小陀螺读数，抑制手持微颤与 yaw 缓慢漂移。
+  imu_gyro_deadband_rad_s: 0.04
   # 互补滤波加速度修正权重与低通平滑系数。
   imu_lowpass_alpha: 0.20
   # SO(3) 姿态目标最大变化率（rad/s），兼顾手腕自然转速（~143°/s）并防止 IMU 跳变让腕部猛转。

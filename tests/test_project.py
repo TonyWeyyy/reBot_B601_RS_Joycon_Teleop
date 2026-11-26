@@ -425,30 +425,31 @@ class ProjectTests(unittest.TestCase):
         joy.close()
         self.assertTrue(driver.closed)
 
-    def test_23_joycon_so3_body_delta_tracks_without_jump_and_ignores_calib_yaw(self):
+    def test_23_joycon_so3_body_clutch_tracks_without_jump_and_ignores_calib_yaw(self):
         driver = FakeJoyConDriver()
-        # 即使开机桌面校准朝向有 90° 偏航，体坐标增量也应只随手柄自身轴旋转，不串轴、无跳变。
+        # 即使开机桌面校准朝向有 90° 偏航，体坐标相对离合姿态也只按手柄自身轴右乘到机械臂，不串轴、无跳变。
         base_rot = Rotation.from_euler("xyz", [0.1, -0.2, math.radians(90.0)]).as_matrix()
         driver.snap.rotation = base_rot.copy()
         home_tf = self.kin.forward(self.settings.home[:6])
-        joy = JoyConInput(self.settings, home_tf[:3, 3], -4.0, 0.0, driver=driver)
+        joy = JoyConInput(self.settings, home_tf[:3, 3], 4.0, 0.0, driver=driver)
         joy.sync_anchor(home_tf)
 
-        # 未转动手柄时，体坐标增量为单位矩阵（零跳变）。
+        # 未转动手柄时，目标姿态严格等于机械臂当前姿态（无跳变）。
         s0 = joy.poll()
-        self.assertIsNotNone(s0.rotation_delta_body)
-        np.testing.assert_allclose(s0.rotation_delta_body, np.eye(3), atol=1e-9)
+        self.assertIsNotNone(s0.target_rotation)
+        np.testing.assert_allclose(s0.target_rotation, home_tf[:3, :3], atol=1e-9)
 
-        # 手柄绕自身体坐标 +X 转 20°，体坐标增量严格为 Rx(20°)，且离合上升沿保持单位矩阵。
+        # 手柄绕自身体坐标 +X 转 20°（物理滚转），机械臂末端应绕末端局部 +X 转 20°（右乘）。
         delta = Rotation.from_euler("xyz", [math.radians(20.0), 0.0, 0.0]).as_matrix()
         driver.snap.rotation = base_rot @ delta
         s1 = joy.poll()
-        np.testing.assert_allclose(s1.rotation_delta_body, delta, atol=1e-6)
+        np.testing.assert_allclose(s1.target_rotation, home_tf[:3, :3] @ delta, atol=1e-6)
 
+        # R 离合上升沿重新锚定当前手柄朝向，保持零跳变。
         driver.snap.buttons = {"r": True}
         driver.snap.rotation = driver.snap.rotation @ delta
         clutch_in = joy.poll()
-        np.testing.assert_allclose(clutch_in.rotation_delta_body, np.eye(3), atol=1e-9)
+        np.testing.assert_allclose(clutch_in.target_rotation, home_tf[:3, :3], atol=1e-9)
 
     def test_24_pos_vel_reads_mos_temperature(self):
         names = [f"joint{i}" for i in range(1, 7)] + ["gripper"]
@@ -1132,13 +1133,16 @@ class ProjectTests(unittest.TestCase):
         self.assertLess(abs(local_rpy_deg[2]), 1.5)  # 几乎无局部偏航串扰
         controller.close()
 
-    def test_61_low_speed_wrist_reversal_responds_immediately_without_lag(self):
-        # 低速（--max-vel 0.05）下快速正转超前贴近限幅后立即反向，cartesian_target 必须立刻反转。
+    def test_61_cyclic_3d_rotation_has_zero_holonomy_and_clipping_drift(self):
+        # 复现 --max-vel 0.12 且开启 imu_yaw_scale=0.8 时，三维反复晃动手腕再回到原位，末端绝不能持续朝单侧漂移。
         low_settings = Settings(self.settings.root, copy.deepcopy(self.settings.raw), self.settings.path)
-        low_settings.with_max_arm_velocity(0.05)
+        low_settings.with_max_arm_velocity(0.12)
         driver = FakeJoyConDriver()
+        calib_rot = Rotation.from_euler("xyz", [0.0, 0.25, math.radians(90.0)]).as_matrix()
+        driver.snap.rotation = calib_rot.copy()
         home_pose = self.kin.pose(low_settings.home[:6])
-        joy = JoyConInput(low_settings, home_pose[:3], -4.0, 0.0, home_pose[3:], driver=driver)
+        close_rad, open_rad = low_settings.gripper_close_open
+        joy = JoyConInput(low_settings, home_pose[:3], open_rad, close_rad, home_pose[3:], driver=driver)
         joy._started -= 2.0
         backend = FakeBackend(low_settings.home)
         controller = TeleopController(low_settings, backend, joy, self.kin, "gpos")
@@ -1149,26 +1153,24 @@ class ProjectTests(unittest.TestCase):
         controller._last_time = time.monotonic() - 0.033
         controller.step()  # 离合切入
 
-        # 先绕手柄 +Z 左转 30°（分 10 帧），触发 0.15 rad 超前裁剪。
-        yaw_deg = 0.0
-        for _ in range(10):
-            yaw_deg += 3.0
-            driver.snap.rotation = Rotation.from_euler("xyz", [0.0, 0.0, math.radians(yaw_deg)]).as_matrix()
+        # 在含各轴耦合的三维 ±25° 周期摆动下刻意触发 tether 限幅，然后手柄回正。
+        for i in range(300):
+            ang = math.radians(25.0) * math.sin(2.0 * math.pi * 0.5 * (i * 0.033))
+            driver.snap.rotation = calib_rot @ Rotation.from_euler("xyz", [ang, 0.7 * ang, 0.5 * ang]).as_matrix()
             driver.snap.last_packet_monotonic = time.monotonic()
             controller._last_time = time.monotonic() - 0.033
             controller.step()
-        peak_target_yaw = Rotation.from_matrix(controller.cartesian_target[:3, :3]).as_euler("xyz")[2]
-        self.assertGreater(math.degrees(peak_target_yaw), 2.0)
 
-        # 立即反向右转 12°（分 4 帧）：cartesian_target 必须立刻显著往回退，而不是继续正转滞后。
-        for _ in range(4):
-            yaw_deg -= 3.0
-            driver.snap.rotation = Rotation.from_euler("xyz", [0.0, 0.0, math.radians(yaw_deg)]).as_matrix()
+        driver.snap.rotation = calib_rot.copy()
+        for _ in range(120):
             driver.snap.last_packet_monotonic = time.monotonic()
             controller._last_time = time.monotonic() - 0.033
             controller.step()
-        after_reverse_yaw = Rotation.from_matrix(controller.cartesian_target[:3, :3]).as_euler("xyz")[2]
-        self.assertLess(math.degrees(after_reverse_yaw), math.degrees(peak_target_yaw) - 5.0)
+
+        end_tf = self.kin.forward(controller.target[:6])
+        end_rpy_deg = np.rad2deg(Rotation.from_matrix(end_tf[:3, :3]).as_euler("xyz"))
+        np.testing.assert_allclose(end_tf[:3, 3], home_pose[:3], atol=1e-4)
+        self.assertLess(float(np.max(np.abs(end_rpy_deg))), 0.1)
         controller.close()
 
     def test_62_rs_gripper_positive_open_limits_and_simulator_mapping(self):
@@ -1284,6 +1286,52 @@ class ProjectTests(unittest.TestCase):
         self.assertIsNone(controller.gripper_protection.hold)
         self.assertGreater(release_frame.target[6], held)
         controller.close()
+
+    def test_64_calibrate_stationary_rejects_shaky_pickup_bias(self):
+        from rebot_joycon.joycon_driver import NativeJoyConDriver
+
+        quiet_pkt = _build_report_0x30(stick_r=(2040, 1815), accel=(0, 0, -4096), gyro=(18, -31, -12))
+        shake_pos = _build_report_0x30(stick_r=(2100, 1820), accel=(0, 0, -4096), gyro=(400, -500, 700))
+        shake_neg = _build_report_0x30(stick_r=(2000, 1810), accel=(0, 0, -4096), gyro=(-200, 300, -100))
+
+        def run_cal(packets, factory_gyro):
+            idx = {"i": 0}
+
+            class FakeHandle:
+                def read(self, size=49, timeout_ms=30):
+                    i = idx["i"]
+                    idx["i"] += 1
+                    if i < len(packets):
+                        return packets[i]
+                    time.sleep(0.01)
+                    return packets[-1]
+
+            drv = NativeJoyConDriver.__new__(NativeJoyConDriver)
+            drv.side = "right"
+            drv.is_right = True
+            drv.stick_deadzone = 0.18
+            drv.stick_axis_signs = (1.0, 1.0)
+            drv._accel_offset = np.zeros(3)
+            drv._accel_scale = np.ones(3)
+            drv._gyro_offset = np.array(factory_gyro, dtype=float)
+            drv._gyro_scale = np.ones(3)
+            drv._stick_center = np.array([2048.0, 2048.0])
+            drv._filter = QuaternionAttitudeFilter(is_right=True)
+            drv._lock = threading.Lock()
+            drv._snapshot = JoyConSnapshot()
+            drv._handle = FakeHandle()
+            drv._calibrate_stationary(0.12)
+            return drv._gyro_offset
+
+        # 场景 1：前段静置、后段提前拿起晃动，必须选中前段最静窗口零偏，不被晃动拉偏。
+        partial_shake = [quiet_pkt] * 16 + [shake_pos, shake_neg] * 10
+        offset1 = run_cal(partial_shake, [0.0, 0.0, 0.0])
+        np.testing.assert_allclose(offset1, [18.0, -31.0, -12.0], atol=1e-6)
+
+        # 场景 2：标定全程持续晃动时保留 SPI 出厂零偏，避免整局产生恒定漂移速度。
+        full_shake = [shake_pos, shake_neg] * 15
+        offset2 = run_cal(full_shake, [16.0, -31.0, -8.0])
+        np.testing.assert_allclose(offset2, [16.0, -31.0, -8.0], atol=1e-6)
 
 
 if __name__ == "__main__":

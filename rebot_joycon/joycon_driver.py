@@ -491,8 +491,37 @@ class NativeJoyConDriver:
                 f"{self.side} Joy-Con 未收到 0x30 IMU 报告；"
                 "请检查手柄电量、蓝牙连接、hidraw 权限，并确保没有其他程序占用该手柄"
             )
-        self._gyro_offset = np.mean(np.asarray(gyro_samples, dtype=float), axis=0)
-        self._stick_center = np.mean(np.asarray(stick_samples, dtype=float), axis=0)
+        factory_gyro = self._gyro_offset.copy()
+        gyro_arr = np.asarray(gyro_samples, dtype=float)
+        stick_arr = np.asarray(stick_samples, dtype=float)
+        gyro_std = float(np.max(np.std(gyro_arr, axis=0)))
+        if gyro_std < 15.0:
+            self._gyro_offset = np.mean(gyro_arr, axis=0)
+            self._stick_center = np.mean(stick_arr, axis=0)
+        else:
+            # 标定期间手柄可能刚被拿起晃动：优先寻找最静止连续窗口；全程晃动时保留出厂零偏防止持续偏航漂移。
+            win_pkts = min(len(stick_arr), 15)
+            best_std = float("inf")
+            best_idx = 0
+            for start_pkt in range(0, len(stick_arr) - win_pkts + 1):
+                sub = gyro_arr[start_pkt * 3:(start_pkt + win_pkts) * 3]
+                sub_std = float(np.max(np.std(sub, axis=0)))
+                if sub_std < best_std:
+                    best_std = sub_std
+                    best_idx = start_pkt
+            if best_std < 15.0:
+                self._gyro_offset = np.mean(gyro_arr[best_idx * 3:(best_idx + win_pkts) * 3], axis=0)
+                self._stick_center = np.mean(stick_arr[best_idx:best_idx + win_pkts], axis=0)
+                print("[joycon] 标定期间检测到短暂晃动，已改用最静时段零偏", flush=True)
+            else:
+                if np.allclose(factory_gyro, 0.0):
+                    self._gyro_offset = np.median(
+                        gyro_arr[best_idx * 3:(best_idx + win_pkts) * 3], axis=0)
+                else:
+                    self._gyro_offset = factory_gyro
+                self._stick_center = np.median(stick_arr, axis=0)
+                print("[joycon] 标定期间手柄持续晃动，已保留出厂陀螺零偏以防止持续漂移",
+                      flush=True)
         with self._lock:
             self._snapshot.rotation = self._filter.rotation
             self._snapshot.stick_xy = np.zeros(2, dtype=float)
