@@ -34,7 +34,16 @@ class MuJoCoView:
         return candidates
 
     def __enter__(self):
-        import mujoco
+        try:
+            import mujoco
+        except ImportError as exc:
+            if self.headless:
+                print("[sim] 无头模式跳过 MuJoCo（当前环境未安装 mujoco）", flush=True)
+                return self
+            raise RuntimeError(
+                "当前 Python 环境未安装 mujoco；真机请加 --headless，"
+                "或执行 pip install mujoco 后再启用仿真显示"
+            ) from exc
         self.mujoco = mujoco
         errors = []
         for path in self._model_paths():

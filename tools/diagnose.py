@@ -95,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  [WARN] hidraw 枚举失败：{exc}")
 
     if args.joycon:
-        print("\n=== 4. Joy-Con 3 秒实时包率体检 ===")
+        print("\n=== 4. Joy-Con 3 秒实时包率体检（请将手柄静置在桌面） ===")
         driver = NativeJoyConDriver(device=side)
         try:
             start_snap = driver.snapshot()
@@ -105,10 +105,14 @@ def main(argv: list[str] | None = None) -> int:
             end_snap = driver.snapshot()
             dt = max(time.monotonic() - t0, 1e-6)
             rate = (end_snap.packet_count - start_snap.packet_count) / dt
-            drift_deg = float(np.rad2deg(np.linalg.norm(
-                Rotation.from_matrix(end_snap.rotation @ r0.T).as_rotvec())))
+            rot_diff = Rotation.from_matrix(end_snap.rotation @ r0.T).as_rotvec()
+            drift_deg = float(np.rad2deg(np.linalg.norm(rot_diff)))
+            axis_drift_deg = np.rad2deg(rot_diff).round(2).tolist()
+            drift_tag = "OK" if drift_deg < 2.0 else "WARN"
             print(f"  [OK] 数据包速率: {rate:.1f} Hz（正常 ~60 Hz）")
-            print(f"  [OK] 3 秒静止姿态漂移: {drift_deg:.2f}°")
+            print(f"  [{drift_tag}] 3 秒静止姿态漂移: {drift_deg:.2f}° (xyz={axis_drift_deg}°)")
+            if drift_deg >= 2.0:
+                print("  [提示] 若体检时手柄未静置在桌面，晃动会反映在此数值中；若静置仍漂移，可适当增大 imu_gyro_deadband_rad_s")
             print(f"  [OK] 当前摇杆 XY: {end_snap.stick_xy.round(3).tolist()}")
             print(f"  [OK] 当前按下键: {[k for k, v in end_snap.buttons.items() if v]}")
         finally:

@@ -359,7 +359,9 @@ class NativeJoyConDriver:
 
         self._packet_number = 0
         self._accel_offset = np.zeros(3, dtype=float)
+        self._accel_scale = np.ones(3, dtype=float)
         self._gyro_offset = np.zeros(3, dtype=float)
+        self._gyro_scale = np.ones(3, dtype=float)
         self._stick_center = np.array([_STICK_DEFAULT_CENTER, _STICK_DEFAULT_CENTER], dtype=float)
         self._filter = QuaternionAttitudeFilter(
             is_right=self.is_right,
@@ -407,7 +409,7 @@ class NativeJoyConDriver:
         return reply[20:20 + size]
 
     def _initialize_device(self) -> None:
-        # 1) 尝试读取出厂/用户加速度偏置（失败不阻塞，后续静态标定兜底）。
+        # 1) 尝试读取出厂/用户 IMU 标定参数（失败不阻塞，后续静态标定兜底）。
         try:
             user_magic = self._spi_read(0x8026, 2)
             imu_cal = self._spi_read(0x8028, 24) if user_magic == b"\xB2\xA1" else self._spi_read(0x6020, 24)
@@ -417,11 +419,31 @@ class NativeJoyConDriver:
                     _int16_le(imu_cal[2], imu_cal[3]),
                     _int16_le(imu_cal[4], imu_cal[5]),
                 ], dtype=float)
+                accel_sens = np.array([
+                    _int16_le(imu_cal[6], imu_cal[7]),
+                    _int16_le(imu_cal[8], imu_cal[9]),
+                    _int16_le(imu_cal[10], imu_cal[11]),
+                ], dtype=float)
+                self._accel_scale = np.where(
+                    (accel_sens > 1000.0) & (accel_sens != 0x4000),
+                    float(0x4000) / accel_sens,
+                    1.0,
+                )
                 self._gyro_offset = np.array([
                     _int16_le(imu_cal[12], imu_cal[13]),
                     _int16_le(imu_cal[14], imu_cal[15]),
                     _int16_le(imu_cal[16], imu_cal[17]),
                 ], dtype=float)
+                gyro_sens = np.array([
+                    _int16_le(imu_cal[18], imu_cal[19]),
+                    _int16_le(imu_cal[20], imu_cal[21]),
+                    _int16_le(imu_cal[22], imu_cal[23]),
+                ], dtype=float)
+                self._gyro_scale = np.where(
+                    (gyro_sens > 1000.0) & (gyro_sens != 0x343B),
+                    float(0x343B) / gyro_sens,
+                    1.0,
+                )
         except Exception:
             pass
         # 2) 开启 6 轴 IMU + 切换到标准 0x30 60Hz 全报告模式 + 点亮 1 号 LED。
@@ -440,20 +462,26 @@ class NativeJoyConDriver:
         gyro_samples: list[tuple[int, int, int]] = []
         stick_samples: list[tuple[int, int]] = []
         deadline = time.monotonic() + duration_s
+        rot = self._filter.rotation
         while time.monotonic() < deadline:
             pkt = self._handle.read(_INPUT_REPORT_SIZE, timeout_ms=30)
             if len(pkt) < _INPUT_REPORT_SIZE or pkt[0] != 0x30:
                 continue
             buttons, stick_raw, accel_raw, gyro_raw = parse_report_0x30(pkt, is_right=self.is_right)
+            # 开启 IMU 后的首包常为全零上电噪声，必须跳过避免拉偏陀螺零偏与倾角初值。
+            if all(v == (0, 0, 0) for v in accel_raw) and all(v == (0, 0, 0) for v in gyro_raw):
+                continue
             gyro_samples.extend(gyro_raw)
             stick_samples.append(stick_raw)
             now = time.monotonic()
-            # 用静止期加速度先把滤波器倾角初始化好。
-            ax, ay, az = accel_raw[-1]
-            accel_g = (np.array([ax, ay, az], dtype=float) - self._accel_offset) * _ACCEL_G_PER_LSB
-            self._filter.update(accel_g, np.zeros(3), 0.015)
+            # 用静止期加速度先把滤波器倾角初始化并收敛到位。
+            for ax, ay, az in accel_raw:
+                accel_g = ((np.array([ax, ay, az], dtype=float) - self._accel_offset)
+                           * self._accel_scale * _ACCEL_G_PER_LSB)
+                rot = self._filter.update(accel_g, np.zeros(3), 0.005)
             with self._lock:
                 self._snapshot.buttons = buttons
+                self._snapshot.rotation = rot
                 self._snapshot.last_packet_monotonic = now
                 self._snapshot.packet_count += 1
                 self._snapshot.battery_level = (pkt[2] >> 5) & 0x07
@@ -465,6 +493,9 @@ class NativeJoyConDriver:
             )
         self._gyro_offset = np.mean(np.asarray(gyro_samples, dtype=float), axis=0)
         self._stick_center = np.mean(np.asarray(stick_samples, dtype=float), axis=0)
+        with self._lock:
+            self._snapshot.rotation = self._filter.rotation
+            self._snapshot.stick_xy = np.zeros(2, dtype=float)
         print(f"[joycon] 标定完成（样本 {len(gyro_samples)}，摇杆中心 "
               f"{self._stick_center.round(1).tolist()}）", flush=True)
 
@@ -474,8 +505,10 @@ class NativeJoyConDriver:
         dt_sub = dt_pkt / 3.0
         rot = self._filter.rotation
         for idx in range(3):
-            accel_g = (np.asarray(accel_raw[idx], dtype=float) - self._accel_offset) * _ACCEL_G_PER_LSB
-            gyro_rad = (np.asarray(gyro_raw[idx], dtype=float) - self._gyro_offset) * _GYRO_RAD_S_PER_LSB
+            accel_g = ((np.asarray(accel_raw[idx], dtype=float) - self._accel_offset)
+                       * self._accel_scale * _ACCEL_G_PER_LSB)
+            gyro_rad = ((np.asarray(gyro_raw[idx], dtype=float) - self._gyro_offset)
+                        * self._gyro_scale * _GYRO_RAD_S_PER_LSB)
             rot = self._filter.update(accel_g, gyro_rad, dt_sub)
         stick_xy = apply_stick_deadzone(
             stick_raw[0], stick_raw[1],

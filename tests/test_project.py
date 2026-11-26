@@ -963,6 +963,60 @@ class ProjectTests(unittest.TestCase):
         self.assertLess(abs(delta[2]), 0.01)
         ctrl.close()
 
+    def test_55_headless_mujoco_view_skips_missing_mujoco(self):
+        with patch.dict(sys.modules, {"mujoco": None}):
+            with MuJoCoView(self.settings, headless=True) as view:
+                self.assertIsNone(view.model)
+                self.assertTrue(view.running)
+                view.update(self.settings.home)
+            with self.assertRaisesRegex(RuntimeError, "未安装 mujoco"):
+                with MuJoCoView(self.settings, headless=False):
+                    pass
+
+    def test_56_calibrate_stationary_skips_zero_warmup_and_publishes_rotation(self):
+        from rebot_joycon.joycon_driver import NativeJoyConDriver
+
+        zero_pkt = _build_report_0x30(accel=(0, 0, 0), gyro=(0, 0, 0))
+        # 模拟平放微倾 Joy-Con（ax=+400, az=-4096）且存在固定陀螺零偏 (18, -31, -12)。
+        tilted_pkt = _build_report_0x30(
+            stick_r=(2100, 1810),
+            accel=(400, 0, -4096),
+            gyro=(18, -31, -12),
+        )
+        packets = [zero_pkt] + [tilted_pkt] * 12
+        idx = {"i": 0}
+
+        class FakeHandle:
+            def read(self, size=49, timeout_ms=30):
+                i = idx["i"]
+                idx["i"] += 1
+                if i < len(packets):
+                    return packets[i]
+                time.sleep(0.01)
+                return tilted_pkt
+
+        drv = NativeJoyConDriver.__new__(NativeJoyConDriver)
+        drv.side = "right"
+        drv.is_right = True
+        drv.stick_deadzone = 0.15
+        drv.stick_axis_signs = (1.0, 1.0)
+        drv._accel_offset = np.zeros(3)
+        drv._accel_scale = np.ones(3)
+        drv._gyro_offset = np.zeros(3)
+        drv._gyro_scale = np.ones(3)
+        drv._stick_center = np.array([2048.0, 2048.0])
+        drv._filter = QuaternionAttitudeFilter(is_right=True)
+        drv._lock = threading.Lock()
+        drv._snapshot = JoyConSnapshot()
+        drv._handle = FakeHandle()
+
+        drv._calibrate_stationary(0.12)
+        np.testing.assert_allclose(drv._gyro_offset, [18.0, -31.0, -12.0], atol=1e-6)
+        snap = drv.snapshot()
+        # 标定结束瞬间的 snapshot.rotation 必须已经是倾斜后的实际姿态，而不是单位矩阵。
+        self.assertGreater(float(np.rad2deg(np.linalg.norm(
+            Rotation.from_matrix(snap.rotation).as_rotvec()))), 3.0)
+
 
 if __name__ == "__main__":
     unittest.main()
