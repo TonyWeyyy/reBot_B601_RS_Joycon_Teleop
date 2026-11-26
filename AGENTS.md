@@ -9,7 +9,7 @@
 - `bash install.sh` uses the active conda env, otherwise creates `.venv` with Python 3.12 (falls back to `python3` 3.10+), installs deps and the vendored Joy-Con package, then runs the test suite.
 - SDKs are external. `arm.rebot_sdk_path` / `arm.sdk_path` in `config/default.yaml` point at local `rebot*` and `reBotArm_control_py` packages; the checked-in paths are machine-specific. `Settings.load()` fails fast if the URDF or hardware YAML is missing.
 - LeRobot requires separate install and `PYTHONPATH` setup; follow `learning/README.md`.
-- Full hardware-free suite: `python3 tools/smoke_test.py` (56 unittest tests). The README uses `python`; this shell only has `python3`.
+- Full hardware-free suite: `python3 tools/smoke_test.py` (57 unittest tests). The README uses `python`; this shell only has `python3`.
 - Single test: `python3 -m unittest tests.test_project.ProjectTests.test_03_soft_limits`
 - No lint, typecheck, formatter, codegen, or CI config exists. The smoke tests are the verification source of truth.
 

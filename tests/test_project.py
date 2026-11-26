@@ -1017,6 +1017,18 @@ class ProjectTests(unittest.TestCase):
         self.assertGreater(float(np.rad2deg(np.linalg.norm(
             Rotation.from_matrix(snap.rotation).as_rotvec()))), 3.0)
 
+    def test_57_fake_backend_survives_past_feedback_grace(self):
+        source = ScriptedInput([InputSample(True, None)])
+        backend = FakeBackend(self.settings.home)
+        controller = TeleopController(self.settings, backend, source, self.kin, "gpos")
+        controller.start()
+        controller.gate.started -= 10.0
+        controller.feedback_started -= 10.0  # 越过 feedback_grace_s=5.0s
+        frame = controller.step()
+        self.assertTrue(frame.allowed)
+        self.assertEqual(frame.state.temperatures, [25.0] * 7)
+        controller.close()
+
 
 if __name__ == "__main__":
     unittest.main()

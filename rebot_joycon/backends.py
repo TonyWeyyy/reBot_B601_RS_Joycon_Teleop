@@ -115,7 +115,7 @@ class FakeBackend(ArmBackend):
         return self.read_state()
 
     def read_state(self) -> ArmState:
-        return ArmState(self.position.copy(), np.zeros(7), np.zeros(7), [None] * 7,
+        return ArmState(self.position.copy(), np.zeros(7), np.zeros(7), [25.0] * 7,
                         time.monotonic())
 
     def command(self, q: np.ndarray) -> None:
