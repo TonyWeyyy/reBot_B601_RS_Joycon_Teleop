@@ -6,15 +6,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from scipy.spatial.transform import Rotation
 
 from lerobot.teleoperators.config import TeleoperatorConfig
 from lerobot.teleoperators.teleoperator import Teleoperator
 
 from rebot_joycon.config import PROJECT_ROOT, Settings
+from rebot_joycon.controller import (limit_attitude_step, step_cartesian_goal,
+                                     tether_cartesian_target)
 from rebot_joycon.errors import SafeStopRequested
 from rebot_joycon.inputs import JoyConInput
-from rebot_joycon.kinematics import RSKinematics, acceptable_ik_result, make_pose
+from rebot_joycon.kinematics import RSKinematics, acceptable_ik_result
 from rebot_joycon.safety import (JointLimiter, SafetyGate, pose_reached,
                                  project_workspace, workspace_contains)
 from .robot import JOINT_NAMES
@@ -97,32 +98,16 @@ class JoyconRSTeleop(Teleoperator):
         return workspace_contains(point, **self.settings.workspace_kwargs(), tol=5e-4)
 
     def _limit_attitude_step(self, target_rot: np.ndarray, dt: float) -> np.ndarray:
-        max_rate = float(self.settings.section("joycon").get("imu_max_rate_rad_s", 1.5))
-        if max_rate <= 0.0:
-            return target_rot.copy()
-        current = self.cartesian_target[:3, :3]
-        delta = Rotation.from_matrix(target_rot @ current.T).as_rotvec()
-        angle = float(np.linalg.norm(delta))
-        limit = max_rate * float(dt)
-        if angle <= limit or angle < 1e-9:
-            return target_rot.copy()
-        return Rotation.from_rotvec(delta * (limit / angle)).as_matrix() @ current
+        max_rate = float(self.settings.section("joycon").get("imu_max_rate_rad_s", 2.5))
+        return limit_attitude_step(self.cartesian_target[:3, :3], target_rot, max_rate, dt)
 
     def _tether(self, current_pose: np.ndarray, desired: np.ndarray) -> np.ndarray:
         safety = self.settings.section("safety")
-        max_lead_m = float(safety.get("max_cartesian_lead_m", 0.04))
-        max_lead_rad = float(safety.get("max_cartesian_lead_rad", 0.25))
-        out = desired.copy()
-        dp = out[:3, 3] - current_pose[:3, 3]
-        dist = float(np.linalg.norm(dp))
-        if dist > max_lead_m and dist > 1e-9:
-            out[:3, 3] = current_pose[:3, 3] + dp * (max_lead_m / dist)
-        rotvec = Rotation.from_matrix(out[:3, :3] @ current_pose[:3, :3].T).as_rotvec()
-        angle = float(np.linalg.norm(rotvec))
-        if angle > max_lead_rad and angle > 1e-9:
-            out[:3, :3] = (Rotation.from_rotvec(rotvec * (max_lead_rad / angle)).as_matrix()
-                           @ current_pose[:3, :3])
-        return out
+        return tether_cartesian_target(
+            current_pose, desired,
+            max_lead_m=float(safety.get("max_cartesian_lead_m", 0.04)),
+            max_lead_rad=float(safety.get("max_cartesian_lead_rad", 0.15)),
+        )
 
     def send_feedback(self, feedback):
         values = np.array([feedback[f"{name}.pos"] for name in JOINT_NAMES], dtype=float)
@@ -183,14 +168,10 @@ class JoyconRSTeleop(Teleoperator):
                 self.gate.fault_latched = True
         else:
             current_pose = self.kin.forward(self.last_valid_q)
-            desired = self.cartesian_target.copy()
-            if sample.cartesian_velocity_m_s is not None:
-                desired[:3, 3] = desired[:3, 3] + np.asarray(sample.cartesian_velocity_m_s) * dt
-            if sample.target_rotation is not None:
-                desired[:3, :3] = self._limit_attitude_step(sample.target_rotation, dt)
-            elif sample.absolute_pose is not None:
-                desired = make_pose(sample.absolute_pose)
-                desired[:3, :3] = self._limit_attitude_step(desired[:3, :3], dt)
+            max_rate = float(self.settings.section("joycon").get("imu_max_rate_rad_s", 2.5))
+            desired = step_cartesian_goal(
+                self.cartesian_target, sample, dt, max_imu_rate_rad_s=max_rate,
+            )
             projected = project_workspace(desired, **self.settings.workspace_kwargs())
             self.cartesian_target = self._tether(current_pose, projected)
             soft_limits = self.joints.soft[:, :6]

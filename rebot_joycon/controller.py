@@ -26,6 +26,78 @@ class ControlFrame:
     episode_events: list[int]
 
 
+def limit_attitude_step(current_rot: np.ndarray, target_rot: np.ndarray,
+                        max_rate: float, dt: float) -> np.ndarray:
+    """在 SO(3) 上限制单步姿态角速度，防止 IMU 异常跳变导致腕部猛转。"""
+    if max_rate <= 0.0:
+        return target_rot.copy()
+    rotation = target_rot @ current_rot.T
+    delta = Rotation.from_matrix(rotation).as_rotvec()
+    angle = float(np.linalg.norm(delta))
+    limit = float(max_rate) * float(dt)
+    if angle <= limit or angle < 1e-9:
+        return target_rot.copy()
+    return Rotation.from_rotvec(delta * (limit / angle)).as_matrix() @ current_rot
+
+
+def tether_cartesian_target(current_pose: np.ndarray, desired: np.ndarray,
+                            *, max_lead_m: float = 0.04,
+                            max_lead_rad: float = 0.15) -> np.ndarray:
+    """限制笛卡尔目标相对当前实际轨迹的最大超前量，防止低速下甩开导致反向延迟或 IK 死锁。"""
+    tethered = desired.copy()
+    dp = tethered[:3, 3] - current_pose[:3, 3]
+    dist = float(np.linalg.norm(dp))
+    if dist > max_lead_m and dist > 1e-9:
+        tethered[:3, 3] = current_pose[:3, 3] + dp * (max_lead_m / dist)
+    r_diff = tethered[:3, :3] @ current_pose[:3, :3].T
+    rotvec = Rotation.from_matrix(r_diff).as_rotvec()
+    angle = float(np.linalg.norm(rotvec))
+    if angle > max_lead_rad and angle > 1e-9:
+        tethered[:3, :3] = (Rotation.from_rotvec(rotvec * (max_lead_rad / angle)).as_matrix()
+                            @ current_pose[:3, :3])
+    return tethered
+
+
+def step_cartesian_goal(cartesian_target: np.ndarray, sample: InputSample,
+                        dt: float, *, max_imu_rate_rad_s: float) -> np.ndarray:
+    """根据输入采样推进一步未裁剪的笛卡尔期望位姿（支持末端体坐标增量姿态）。"""
+    if (sample.cartesian_velocity_m_s is not None
+            or sample.rotation_delta_body is not None
+            or sample.target_rotation is not None):
+        desired = cartesian_target.copy()
+        if sample.cartesian_velocity_m_s is not None:
+            vel = np.asarray(sample.cartesian_velocity_m_s, dtype=float)
+            if vel.shape == (3,) and np.isfinite(vel).all():
+                desired[:3, 3] = desired[:3, 3] + vel * dt
+        if sample.rotation_delta_body is not None:
+            delta_body = np.asarray(sample.rotation_delta_body, dtype=float)
+            if delta_body.shape == (3, 3) and np.isfinite(delta_body).all():
+                candidate = desired[:3, :3] @ delta_body
+                desired[:3, :3] = limit_attitude_step(
+                    cartesian_target[:3, :3], candidate, max_imu_rate_rad_s, dt,
+                )
+        elif sample.target_rotation is not None:
+            rot = np.asarray(sample.target_rotation, dtype=float)
+            if rot.shape == (3, 3) and np.isfinite(rot).all():
+                desired[:3, :3] = limit_attitude_step(
+                    cartesian_target[:3, :3], rot, max_imu_rate_rad_s, dt,
+                )
+        return desired
+    if sample.absolute_pose is not None:
+        desired = make_pose(sample.absolute_pose)
+        desired[:3, :3] = limit_attitude_step(
+            cartesian_target[:3, :3], desired[:3, :3], max_imu_rate_rad_s, dt,
+        )
+        return desired
+    direction = sample.cartesian_direction
+    desired = cartesian_target.copy()
+    desired[:3, 3] += direction[:3] * 0.12 * dt
+    if np.any(direction[3:]):
+        rotation = Rotation.from_rotvec(direction[3:] * 0.8 * dt).as_matrix()
+        desired[:3, :3] = rotation @ desired[:3, :3]
+    return desired
+
+
 class TeleopController:
     def __init__(self, settings: Settings, backend: ArmBackend, input_source,
                  kinematics: RSKinematics, mode: str,
@@ -128,35 +200,17 @@ class TeleopController:
 
     def _limit_attitude_step(self, target_rot: np.ndarray, dt: float) -> np.ndarray:
         """Limit orientation changes in SO(3), not independent RPY axes."""
-        max_rate = float(self.settings.section("joycon").get("imu_max_rate_rad_s", 1.5))
-        if max_rate <= 0.0:
-            return target_rot.copy()
-        current = self.cartesian_target[:3, :3]
-        rotation = target_rot @ current.T
-        delta = Rotation.from_matrix(rotation).as_rotvec()
-        angle = float(np.linalg.norm(delta))
-        limit = max_rate * float(dt)
-        if angle <= limit or angle < 1e-9:
-            return target_rot.copy()
-        return Rotation.from_rotvec(delta * (limit / angle)).as_matrix() @ current
+        max_rate = float(self.settings.section("joycon").get("imu_max_rate_rad_s", 2.5))
+        return limit_attitude_step(self.cartesian_target[:3, :3], target_rot, max_rate, dt)
 
     def _tether_cartesian_target(self, current_pose: np.ndarray, desired: np.ndarray) -> np.ndarray:
-        """限制笛卡尔目标相对当前实际轨迹的最大超前量，防止低速下甩开导致 IK 死锁。"""
+        """限制笛卡尔目标相对当前实际轨迹的最大超前量，防止低速下甩开导致反向延迟或 IK 死锁。"""
         safety = self.settings.section("safety")
-        max_lead_m = float(safety.get("max_cartesian_lead_m", 0.04))
-        max_lead_rad = float(safety.get("max_cartesian_lead_rad", 0.25))
-        tethered = desired.copy()
-        dp = tethered[:3, 3] - current_pose[:3, 3]
-        dist = float(np.linalg.norm(dp))
-        if dist > max_lead_m and dist > 1e-9:
-            tethered[:3, 3] = current_pose[:3, 3] + dp * (max_lead_m / dist)
-        r_diff = tethered[:3, :3] @ current_pose[:3, :3].T
-        rotvec = Rotation.from_matrix(r_diff).as_rotvec()
-        angle = float(np.linalg.norm(rotvec))
-        if angle > max_lead_rad and angle > 1e-9:
-            tethered[:3, :3] = (Rotation.from_rotvec(rotvec * (max_lead_rad / angle)).as_matrix()
-                                @ current_pose[:3, :3])
-        return tethered
+        return tether_cartesian_target(
+            current_pose, desired,
+            max_lead_m=float(safety.get("max_cartesian_lead_m", 0.04)),
+            max_lead_rad=float(safety.get("max_cartesian_lead_rad", 0.15)),
+        )
 
     def _goal_from_input(self, sample: InputSample, dt: float) -> np.ndarray:
         goal = self.target.copy()
@@ -165,26 +219,10 @@ class TeleopController:
             goal[:6] += sample.joint_direction * max_velocity[:6] * dt
         else:
             current_pose = self.kin.forward(self.target[:6])
-            if sample.cartesian_velocity_m_s is not None or sample.target_rotation is not None:
-                desired = self.cartesian_target.copy()
-                if sample.cartesian_velocity_m_s is not None:
-                    vel = np.asarray(sample.cartesian_velocity_m_s, dtype=float)
-                    if vel.shape == (3,) and np.isfinite(vel).all():
-                        desired[:3, 3] = desired[:3, 3] + vel * dt
-                if sample.target_rotation is not None:
-                    rot = np.asarray(sample.target_rotation, dtype=float)
-                    if rot.shape == (3, 3) and np.isfinite(rot).all():
-                        desired[:3, :3] = self._limit_attitude_step(rot, dt)
-            elif sample.absolute_pose is not None:
-                desired = make_pose(sample.absolute_pose)
-                desired[:3, :3] = self._limit_attitude_step(desired[:3, :3], dt)
-            else:
-                direction = sample.cartesian_direction
-                desired = self.cartesian_target.copy()
-                desired[:3, 3] += direction[:3] * 0.12 * dt
-                if np.any(direction[3:]):
-                    rotation = Rotation.from_rotvec(direction[3:] * 0.8 * dt).as_matrix()
-                    desired[:3, :3] = rotation @ desired[:3, :3]
+            max_rate = float(self.settings.section("joycon").get("imu_max_rate_rad_s", 2.5))
+            desired = step_cartesian_goal(
+                self.cartesian_target, sample, dt, max_imu_rate_rad_s=max_rate,
+            )
 
             projected = project_workspace(desired, **self._workspace_kwargs())
             self.cartesian_target = self._tether_cartesian_target(current_pose, projected)

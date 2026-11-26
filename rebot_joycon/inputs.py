@@ -18,10 +18,11 @@ class InputSample:
     streaming_heartbeat: bool = True
     joint_direction: np.ndarray = field(default_factory=lambda: np.zeros(6))
     cartesian_direction: np.ndarray = field(default_factory=lambda: np.zeros(6))
-    # Joy-Con 速度 + 纯 SO(3) 相对姿态模式（避免绝对位姿跳变和欧拉角万向节锁）。
+    # Joy-Con 速度 + 末端体坐标增量 SO(3) 姿态（与开机桌面航向、当前臂长 yaw 无关）。
     cartesian_velocity_m_s: np.ndarray | None = None
+    rotation_delta_body: np.ndarray | None = None
+    # 兼容外部直接给目标姿态旋转矩阵或绝对 6D 位姿的测试或调用方。
     target_rotation: np.ndarray | None = None
-    # 兼容外部直接给绝对 6D 位姿的测试或调用方。
     absolute_pose: np.ndarray | None = None
     gripper_absolute: float | None = None
     gripper_direction: float = 0.0
@@ -172,9 +173,10 @@ class JoyConInput:
 
         self._started = time.monotonic()
         self._prev_buttons: dict[str, bool] = {}
+        self._prev_deadman: bool = False
         self._exit_press_started: float | None = None
-        # 离合锚点：当前使能段开始时的 (手柄姿态, 机械臂实际末端姿态)。
-        self._imu_anchor: np.ndarray | None = None
+        # 上一帧手柄姿态（用于计算手柄自身坐标系下的帧间增量旋转），以及最近锚定机械臂姿态。
+        self._prev_imu_rot: np.ndarray | None = None
         self._arm_rot_anchor: np.ndarray = (
             Rotation.from_euler("xyz", np.asarray(home_rpy, dtype=float)).as_matrix()
             if home_rpy is not None else np.eye(3)
@@ -189,7 +191,7 @@ class JoyConInput:
         snap = self.driver.snapshot()
         self._arm_pos_anchor = pose[:3, 3].copy()
         self._arm_rot_anchor = pose[:3, :3].copy()
-        self._imu_anchor = snap.rotation.copy()
+        self._prev_imu_rot = snap.rotation.copy()
 
     def rebase(self, xyz: np.ndarray, rpy: np.ndarray) -> None:
         """兼容接口：等价于 sync_anchor(make_pose(xyz, rpy))。"""
@@ -203,12 +205,11 @@ class JoyConInput:
         pose[:3, :3] = Rotation.from_euler("xyz", rpy).as_matrix()
         self.sync_anchor(pose)
 
-    def _scaled_relative_rotation(self, current_imu_rot: np.ndarray) -> np.ndarray:
-        """计算相对锚点的 SO(3) 增量旋转，支持单轴符号与 yaw 缩放。"""
-        if self._imu_anchor is None:
-            return self._arm_rot_anchor.copy()
-        r_rel = current_imu_rot @ self._imu_anchor.T
-        rotvec = Rotation.from_matrix(r_rel).as_rotvec()
+    def _scaled_body_delta(self, prev_imu_rot: np.ndarray,
+                           current_imu_rot: np.ndarray) -> np.ndarray:
+        """计算手柄体坐标系下的帧间 SO(3) 增量旋转，不受校准朝向或手臂转向影响。"""
+        d_body = prev_imu_rot.T @ current_imu_rot
+        rotvec = Rotation.from_matrix(d_body).as_rotvec()
         scale = np.array([
             self.rotation_scale * self.imu_axis_signs[0],
             self.rotation_scale * self.imu_axis_signs[1],
@@ -216,8 +217,8 @@ class JoyConInput:
         ], dtype=float)
         scaled_vec = rotvec * scale
         if float(np.linalg.norm(scaled_vec)) < 1e-12:
-            return self._arm_rot_anchor.copy()
-        return Rotation.from_rotvec(scaled_vec).as_matrix() @ self._arm_rot_anchor
+            return np.eye(3, dtype=float)
+        return Rotation.from_rotvec(scaled_vec).as_matrix()
 
     def poll(self) -> InputSample:
         snap: JoyConSnapshot = self.driver.snapshot()
@@ -267,6 +268,8 @@ class JoyConInput:
             events.append(-1)
 
         # 记录本帧按键状态用于下一帧上升沿检测。
+        rising_deadman = deadman and not self._prev_deadman
+        self._prev_deadman = deadman
         self._prev_buttons = dict(buttons)
 
         # 世界系平移速度：摇杆驱动 X/Y，X/B 驱动纯 Z 上升/下降。
@@ -277,16 +280,20 @@ class JoyConInput:
             vz,
         ], dtype=float)
 
-        if self._imu_anchor is None:
-            self._imu_anchor = snap.rotation.copy()
-        target_rot = self._scaled_relative_rotation(snap.rotation)
+        curr_rot = snap.rotation.copy()
+        prev_rot = self._prev_imu_rot
+        self._prev_imu_rot = curr_rot
+        if prev_rot is None or rising_deadman:
+            delta_body = np.eye(3, dtype=float)
+        else:
+            delta_body = self._scaled_body_delta(prev_rot, curr_rot)
 
         return InputSample(
             deadman=deadman,
             heartbeat=snap.last_packet_monotonic,
             streaming_heartbeat=self.require_imu_heartbeat,
             cartesian_velocity_m_s=velocity,
-            target_rotation=target_rot,
+            rotation_delta_body=delta_body,
             gripper_absolute=self.gripper_state,
             home=home,
             exit=exit_triggered,

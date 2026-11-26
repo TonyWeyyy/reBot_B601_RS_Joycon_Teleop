@@ -217,7 +217,7 @@ class QuaternionAttitudeFilter:
 
     def __init__(self, *, is_right: bool = True,
                  gyro_deadband_rad_s: float = 0.03,
-                 accel_gain: float = 2.0,
+                 accel_gain: float = 0.6,
                  lowpass_alpha: float = 0.20):
         self.is_right = is_right
         self.gyro_deadband_rad_s = max(0.0, float(gyro_deadband_rad_s))
