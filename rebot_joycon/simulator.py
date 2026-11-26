@@ -86,9 +86,9 @@ class MuJoCoView:
 
     def _apply_qpos(self, q: np.ndarray) -> None:
         self.data.qpos[self._arm_addresses] = q[:6]
-        scale = float(self.settings.section("safety").get("joint_limit_scale", 0.7))
-        lower, upper = self.settings.gripper_limits * scale
-        fraction = float(np.clip((upper - q[6]) / (upper - lower), 0.0, 1.0))
+        close_rad, open_rad = self.settings.gripper_close_open
+        span = open_rad - close_rad
+        fraction = float(np.clip((q[6] - close_rad) / span, 0.0, 1.0)) if abs(span) > 1e-9 else 0.0
         for address, full_open in self._finger_targets:
             self.data.qpos[address] = full_open * fraction
         self.mujoco.mj_forward(self.model, self.data)

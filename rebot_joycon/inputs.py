@@ -183,6 +183,15 @@ class JoyConInput:
         )
         self._arm_pos_anchor: np.ndarray = np.asarray(home_xyz, dtype=float).copy()
 
+    def sync_gripper(self, position: float) -> None:
+        """同步夹爪状态初值（如启动时夹爪本就处于张开态，或回 HOME 闭合完成后）。"""
+        value = float(position)
+        if not np.isfinite(value):
+            return
+        low = min(self.gripper_open, self.gripper_close)
+        high = max(self.gripper_open, self.gripper_close)
+        self.gripper_state = float(np.clip(value, low, high))
+
     def sync_anchor(self, arm_pose: np.ndarray) -> None:
         """将当前 Joy-Con 姿态与机械臂实际 TCP 位姿重新锚定（无跳变离合）。"""
         pose = np.asarray(arm_pose, dtype=float)
@@ -256,7 +265,7 @@ class JoyConInput:
 
         # ZR 上升沿切换夹爪开合（启动保护后且按住使能时生效，避免闲置误触排队动作）。
         if past_guard and deadman and rising("gripper"):
-            if abs(self.gripper_state - self.gripper_open) < 1e-6:
+            if abs(self.gripper_state - self.gripper_open) <= abs(self.gripper_state - self.gripper_close):
                 self.gripper_state = self.gripper_close
             else:
                 self.gripper_state = self.gripper_open

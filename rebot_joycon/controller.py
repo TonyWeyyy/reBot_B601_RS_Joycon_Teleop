@@ -160,6 +160,9 @@ class TeleopController:
             self.cartesian_target = self.kin.forward(clamped[:6])
             self.rate.reset(clamped)
             self._rebase_input(clamped)
+            sync_gripper = getattr(self.input, "sync_gripper", None)
+            if sync_gripper is not None:
+                sync_gripper(float(clamped[6]))
         except Exception:
             self.backend.safe_stop()
             raise
@@ -359,6 +362,9 @@ class TeleopController:
                                      arm_tolerance_rad=arm_tol, gripper_tolerance_rad=grip_tol)):
                 self.home_active = False
                 self._rebase_input(target)
+                sync_gripper = getattr(self.input, "sync_gripper", None)
+                if sync_gripper is not None:
+                    sync_gripper(float(target[6]))
                 # HOME 后必须松开再重新按住，避免手柄在回 HOME 期间的位移突然生效。
                 self.gate.fault_latched = True
                 self._log("home_done", q_deg=np.rad2deg(state.position).round(2).tolist())
@@ -371,7 +377,13 @@ class TeleopController:
                 self._home_print = now
 
         measured_torque = float(state.torque[6]) if np.isfinite(state.torque[6]) else None
-        target[6] = self.gripper_protection.apply(target[6], state.position[6], measured_torque)
+        protected_gripper = self.gripper_protection.apply(
+            target[6], state.position[6], measured_torque,
+        )
+        if abs(protected_gripper - target[6]) > 1e-12:
+            target[6] = protected_gripper
+            self.rate.position[6] = protected_gripper
+            self.rate.velocity[6] = 0.0
         target = self.joints.clamp(target)
         self.backend.command(target)
         self.target = target.copy()

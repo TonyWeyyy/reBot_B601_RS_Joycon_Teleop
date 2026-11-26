@@ -110,6 +110,19 @@ class Settings:
         return value
 
     @property
+    def gripper_soft_limits(self) -> np.ndarray:
+        scale = float(self.section("safety").get("joint_limit_scale", 0.7))
+        return self.gripper_limits * scale
+
+    @property
+    def gripper_close_open(self) -> tuple[float, float]:
+        """返回 (闭合弧度, 安全张开弧度)：0 为闭合点，非零端乘以软件缩放为安全张开点。"""
+        soft = self.gripper_soft_limits
+        if abs(soft[0]) <= abs(soft[1]):
+            return float(soft[0]), float(soft[1])
+        return float(soft[1]), float(soft[0])
+
+    @property
     def max_velocity(self) -> np.ndarray:
         return _finite_vector(self.section("safety").get("max_joint_velocity_rad_s"),
                               7, "safety.max_joint_velocity_rad_s")

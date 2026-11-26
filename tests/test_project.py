@@ -576,9 +576,9 @@ class ProjectTests(unittest.TestCase):
     def test_29_gripper_zero_feedback_tolerance(self):
         limiter = JointLimiter(self.kin.limits, self.settings.gripper_limits)
         q = np.zeros(7)
-        q[6] = np.deg2rad(0.25)
+        q[6] = np.deg2rad(-0.25)
         limiter.validate(q)
-        q[6] = np.deg2rad(2.0)
+        q[6] = np.deg2rad(-2.0)
         with self.assertRaises(SafetyError):
             limiter.validate(q)
 
@@ -1169,6 +1169,120 @@ class ProjectTests(unittest.TestCase):
             controller.step()
         after_reverse_yaw = Rotation.from_matrix(controller.cartesian_target[:3, :3]).as_euler("xyz")[2]
         self.assertLess(math.degrees(after_reverse_yaw), math.degrees(peak_target_yaw) - 5.0)
+        controller.close()
+
+    def test_62_rs_gripper_positive_open_limits_and_simulator_mapping(self):
+        close_rad, open_rad = self.settings.gripper_close_open
+        self.assertAlmostEqual(close_rad, 0.0, places=9)
+        self.assertGreater(open_rad, 4.0)
+
+        # 验证 ZR 在 RS 正向夹爪行程下能从闭合零位平滑张开到 > 2.0 rad，再次点按回到 0。
+        driver = FakeJoyConDriver()
+        home_pose = self.kin.pose(self.settings.home[:6])
+        joy = JoyConInput(self.settings, home_pose[:3], open_rad, close_rad, home_pose[3:], driver=driver)
+        joy._started -= 2.0
+        init_q = self.settings.home.copy()
+        init_q[6] = math.radians(-0.22)  # 复现真机闭合零点编码器微负偏
+        backend = FakeBackend(init_q)
+        controller = TeleopController(self.settings, backend, joy, self.kin, "gpos")
+        controller.start()
+        controller.gate.started -= 2.0
+
+        driver.snap.buttons = {"r": True}
+        controller._last_time = time.monotonic() - 0.033
+        controller.step()
+        driver.snap.buttons = {"r": True, "zr": True}
+        controller._last_time = time.monotonic() - 0.033
+        controller.step()
+        driver.snap.buttons = {"r": True}
+        for _ in range(70):
+            driver.snap.last_packet_monotonic = time.monotonic()
+            controller._last_time = time.monotonic() - 0.033
+            frame = controller.step()
+        self.assertGreater(frame.target[6], 2.0)
+
+        driver.snap.buttons = {"r": True, "zr": True}
+        controller._last_time = time.monotonic() - 0.033
+        controller.step()
+        driver.snap.buttons = {"r": True}
+        for _ in range(120):
+            driver.snap.last_packet_monotonic = time.monotonic()
+            controller._last_time = time.monotonic() - 0.033
+            frame = controller.step()
+        self.assertAlmostEqual(frame.target[6], 0.0, places=3)
+
+        # 验证 MuJoCo 视图同步：0 闭合 -> 0，+open_rad 张开 -> full_open。
+        qpos = np.zeros(8)
+        view = MuJoCoView.__new__(MuJoCoView)
+        view.settings = self.settings
+        view.model = object()
+        view.data = types.SimpleNamespace(qpos=qpos)
+        view.mujoco = types.SimpleNamespace(mj_forward=lambda _m, _d: None)
+        view._arm_addresses = list(range(6))
+        view._finger_targets = [(6, 0.05), (7, 0.0715)]
+        view._apply_qpos(np.zeros(7))
+        self.assertAlmostEqual(float(qpos[6]), 0.0, places=9)
+        self.assertAlmostEqual(float(qpos[7]), 0.0, places=9)
+        q_open = np.zeros(7)
+        q_open[6] = open_rad
+        view._apply_qpos(q_open)
+        self.assertAlmostEqual(float(qpos[6]), 0.05, places=9)
+        self.assertAlmostEqual(float(qpos[7]), 0.0715, places=9)
+        controller.close()
+
+    def test_63_gripper_initial_open_sync_and_torque_hold_immediate_release(self):
+        close_rad, open_rad = self.settings.gripper_close_open
+        driver = FakeJoyConDriver()
+        home_pose = self.kin.pose(self.settings.home[:6])
+        joy = JoyConInput(self.settings, home_pose[:3], open_rad, close_rad, home_pose[3:], driver=driver)
+        joy._started -= 2.0
+
+        # 启动时若物理夹爪原本处于张开 +3.5 rad，首次按住 R 不能误把夹爪甩回 0；点按 ZR 后应改为闭合。
+        start_open = self.settings.home.copy()
+        start_open[6] = 3.5
+        backend = FakeBackend(start_open)
+        controller = TeleopController(self.settings, backend, joy, self.kin, "gpos")
+        controller.start()
+        controller.gate.started -= 2.0
+
+        driver.snap.buttons = {"r": True}
+        for _ in range(5):
+            driver.snap.last_packet_monotonic = time.monotonic()
+            controller._last_time = time.monotonic() - 0.033
+            frame = controller.step()
+        self.assertAlmostEqual(frame.target[6], 3.5, places=6)
+
+        # 点按 ZR 闭合时若在中途 +1.8 rad 夹住物体（力矩 -1.5 Nm），再按 ZR 张开须立即向上松开，不滞后。
+        driver.snap.buttons = {"r": True, "zr": True}
+        controller._last_time = time.monotonic() - 0.033
+        controller.step()
+        driver.snap.buttons = {"r": True}
+
+        def read_pinched():
+            pos = backend.position.copy()
+            torq = np.zeros(7)
+            if pos[6] <= 1.85:
+                pos[6] = 1.8
+                torq[6] = -1.5
+            return ArmState(pos, np.zeros(7), torq, [30.0] * 7, time.monotonic())
+
+        backend.read_state = read_pinched
+        for _ in range(60):
+            driver.snap.last_packet_monotonic = time.monotonic()
+            controller._last_time = time.monotonic() - 0.033
+            frame = controller.step()
+        self.assertIsNotNone(controller.gripper_protection.hold)
+        held = float(frame.target[6])
+        self.assertAlmostEqual(held, 1.8, places=2)
+
+        # 恢复正常读数并按 ZR 要求张开：必须立刻摆脱 held 向上运动，不被 rate.position 滞后拖住。
+        backend.read_state = lambda: ArmState(backend.position.copy(), np.zeros(7), np.zeros(7),
+                                              [30.0] * 7, time.monotonic())
+        driver.snap.buttons = {"r": True, "zr": True}
+        controller._last_time = time.monotonic() - 0.033
+        release_frame = controller.step()
+        self.assertIsNone(controller.gripper_protection.hold)
+        self.assertGreater(release_frame.target[6], held)
         controller.close()
 
 

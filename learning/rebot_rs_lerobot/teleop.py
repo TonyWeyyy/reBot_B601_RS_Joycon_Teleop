@@ -77,10 +77,9 @@ class JoyconRSTeleop(Teleoperator):
 
     def connect(self, calibrate: bool = True):
         home_pose = self.kin.pose(self.settings.home[:6])
-        scale = float(self.settings.section("safety").get("joint_limit_scale", 0.7))
+        gripper_close, gripper_open = self.settings.gripper_close_open
         self.input = JoyConInput(self.settings, home_pose[:3],
-                                 self.settings.gripper_limits[0] * scale,
-                                 self.settings.gripper_limits[1], home_pose[3:])
+                                 gripper_open, gripper_close, home_pose[3:])
         self.last_time = None
         self._was_allowed = False
         self._initialized_hold = False
@@ -119,6 +118,9 @@ class JoyconRSTeleop(Teleoperator):
             self.last_valid_q = clamped[:6].copy()
             self.gripper_target = float(clamped[6])
             self._sync_anchor(self.last_valid_q)
+            sync_gripper = getattr(self.input, "sync_gripper", None)
+            if sync_gripper is not None:
+                sync_gripper(self.gripper_target)
             self._initialized_hold = True
 
     def get_action(self):
@@ -166,6 +168,9 @@ class JoyconRSTeleop(Teleoperator):
                             gripper_tolerance_rad=float(safety.get("gripper_home_tolerance_rad", 0.15))):
                 self.home_active = False
                 self.gate.fault_latched = True
+                sync_gripper = getattr(self.input, "sync_gripper", None)
+                if sync_gripper is not None:
+                    sync_gripper(float(gripper))
         else:
             current_pose = self.kin.forward(self.last_valid_q)
             max_rate = float(self.settings.section("joycon").get("imu_max_rate_rad_s", 2.5))

@@ -94,10 +94,9 @@ def main(argv: list[str] | None = None) -> int:
     saved_signals = _install_termination_signals()
     try:
         home_pose = kin.pose(settings.home[:6])
-        gripper_scale = float(settings.section("safety").get("joint_limit_scale", 0.7))
+        gripper_close, gripper_open = settings.gripper_close_open
         input_source = (JoyConInput(settings, home_pose[:3],
-                                    settings.gripper_limits[0] * gripper_scale,
-                                    settings.gripper_limits[1], home_pose[3:])
+                                    gripper_open, gripper_close, home_pose[3:])
                         if args.input == "joycon" else KeyboardInput(settings))
         backend = create_backend(settings, "fake" if not args.real or args.dry_run else args.backend,
                                  initial=settings.home)
