@@ -275,7 +275,7 @@ class PosVelBackend(ArmBackend):
             return
         safety = self.settings.section("safety")
         timeout = float(safety.get("home_timeout_s", 15.0))
-        arm_tol = float(safety.get("home_tolerance_rad", 0.04))
+        arm_tol = min(float(safety.get("home_tolerance_rad", 0.08)), 0.05)
         grip_tol = float(safety.get("gripper_home_tolerance_rad", 0.15))
         start = self.read_state().position
         # smoothstep peak speed is 1.5 * delta / duration; keep it within the
@@ -498,7 +498,7 @@ class RebotMITBackend(ArmBackend):
             return
         safety = self.settings.section("safety")
         timeout = float(safety.get("home_timeout_s", 15.0))
-        arm_tol = float(safety.get("home_tolerance_rad", 0.04))
+        arm_tol = min(float(safety.get("home_tolerance_rad", 0.08)), 0.05)
         grip_tol = float(safety.get("gripper_home_tolerance_rad", 0.15))
         start = self.read_state().position.copy()
         peak_speeds = 1.5 * np.abs(start) / self.settings.max_velocity

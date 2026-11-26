@@ -1029,6 +1029,67 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(frame.state.temperatures, [25.0] * 7)
         controller.close()
 
+    def test_58_idle_hold_does_not_ratchet_gravity_sag(self):
+        # 复现无重力补偿 MIT PD 在 HOME 悬空约 3° 静差下，松开使能不应把 target 往下拉导致越掉越低。
+        class DroopyBackend(FakeBackend):
+            def read_state(self):
+                # 模拟重力使 J2 下沉 +2.5°, J3 下垂 -3.1°, J4 下垂 -2.8°
+                sagged = self.target.copy()
+                sagged[1] += math.radians(2.5)
+                sagged[2] -= math.radians(3.1)
+                sagged[3] -= math.radians(2.8)
+                return ArmState(sagged, np.zeros(7), np.zeros(7), [30.0] * 7, time.monotonic())
+
+        samples = [InputSample(False, None) for _ in range(15)] + [InputSample(True, None)]
+        source = ScriptedInput(samples)
+        backend = DroopyBackend(self.settings.home)
+        controller = TeleopController(self.settings, backend, source, self.kin, "gpos")
+        controller.start()
+        # start() 从实际姿态起步，随后手动模拟已规划到 HOME 的保持目标。
+        controller.target = self.settings.home.copy()
+        controller.rate.reset(self.settings.home)
+        controller.gate.started -= 2.0
+
+        # 松开使能连续 15 帧，command 必须死死守住 settings.home，绝不往下滑。
+        for _ in range(15):
+            controller._last_time = time.monotonic() - 0.033
+            frame = controller.step()
+            self.assertFalse(frame.allowed)
+            np.testing.assert_allclose(frame.target, self.settings.home, atol=1e-9)
+
+        # 重新按下使能时同样保持 settings.home，不瞬间丢掉 PD 保持力矩。
+        controller._last_time = time.monotonic() - 0.033
+        active = controller.step()
+        self.assertTrue(active.allowed)
+        np.testing.assert_allclose(active.target, self.settings.home, atol=1e-6)
+        controller.close()
+
+    def test_59_home_completes_under_mit_static_droop_and_boundary_ik_accepted(self):
+        class DroopyHomeBackend(FakeBackend):
+            def read_state(self):
+                sagged = self.target.copy()
+                sagged[2] -= math.radians(3.2)  # 实测 MIT 伸展态 J3 约 3.2° 重力静差
+                return ArmState(sagged, np.zeros(7), np.zeros(7), [30.0] * 7, time.monotonic())
+
+        samples = [InputSample(True, None, home=True)] + [InputSample(True, None) for _ in range(10)]
+        source = ScriptedInput(samples)
+        backend = DroopyHomeBackend(self.settings.home)
+        controller = TeleopController(self.settings, backend, source, self.kin, "gpos")
+        controller.start()
+        controller.target = self.settings.home.copy()
+        controller.rate.reset(self.settings.home)
+        controller.gate.started -= 2.0
+        controller.step()
+        self.assertFalse(controller.home_active)
+        self.assertTrue(controller.gate.fault_latched)
+
+        # 验证 z=0.04m 边界附近因 IK 1e-4 收敛精度导致的 0.05mm 误差不会被 _workspace_ok 误拒。
+        p = self.kin.forward(self.settings.home[:6]).copy()
+        p[2, 3] = 0.03995
+        q_boundary = self.kin.ik(self.settings.home[:6], p, joint_limits=controller.joints.soft[:, :6]).q
+        self.assertTrue(controller._workspace_ok(q_boundary))
+        controller.close()
+
 
 if __name__ == "__main__":
     unittest.main()

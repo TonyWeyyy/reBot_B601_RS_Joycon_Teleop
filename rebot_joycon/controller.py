@@ -83,10 +83,11 @@ class TeleopController:
             self.feedback_started = time.monotonic()
             validate_feedback(state, self.settings.section("safety"), now=self.feedback_started,
                               started=self.feedback_started)
-            self.target = state.position.copy()
-            self.cartesian_target = self.kin.forward(state.position[:6])
-            self.rate.reset(state.position)
-            self._rebase_input(state.position)
+            clamped = self.joints.clamp(state.position)
+            self.target = clamped.copy()
+            self.cartesian_target = self.kin.forward(clamped[:6])
+            self.rate.reset(clamped)
+            self._rebase_input(clamped)
         except Exception:
             self.backend.safe_stop()
             raise
@@ -122,7 +123,8 @@ class TeleopController:
 
     def _workspace_ok(self, q: np.ndarray) -> bool:
         point = self.kin.forward(q)[:3, 3]
-        return workspace_contains(point, **self._workspace_kwargs())
+        # 允许 0.5 mm 容差以匹配 IK 收敛精度（1e-4 m），避免在边界贴边时误拒可行解。
+        return workspace_contains(point, **self._workspace_kwargs(), tol=5e-4)
 
     def _limit_attitude_step(self, target_rot: np.ndarray, dt: float) -> np.ndarray:
         """Limit orientation changes in SO(3), not independent RPY axes."""
@@ -265,13 +267,21 @@ class TeleopController:
             streaming=getattr(sample, "streaming_heartbeat", True),
         )
         if not status.allowed or dt > 0.25:
-            # 暂停或推理卡顿后从实际位置重新起步，不补发累计运动。
-            # home_pending 不清除：启动时尚未按住使能，不应永久取消启动回 HOME。
+            # 绝不在正常待机（未按使能）时每帧用受重力下垂的 state.position 覆盖 self.target，
+            # 否则无重力前馈的 MIT PD 会形成“下垂→重设目标→继续下垂”的滑落正反馈。
+            # 仅在控制周期卡顿（dt > 0.25s）或实际位置与保持目标偏差过大（如受阻/外力推偏 > 14°）时，
+            # 才从实际位置安全重同步。
             self.home_active = False
-            self.target = state.position.copy()
-            self.cartesian_target = self.kin.forward(state.position[:6])
-            self.rate.reset(state.position)
-            self._rebase_input(state.position)
+            tracking_lag = float(np.max(np.abs(state.position[:6] - self.target[:6])))
+            if dt > 0.25 or tracking_lag > 0.25:
+                hold = self.joints.clamp(state.position)
+                self.target = hold
+            else:
+                hold = self.joints.clamp(self.target)
+                self.target = hold
+            self.cartesian_target = self.kin.forward(hold[:6])
+            self.rate.reset(hold)
+            self._rebase_input(hold)
             reason = status.reason or f"控制周期过长(dt={dt:.2f}s)，已复位轨迹"
             if reason != self._wait_reason:
                 self._log("gate_wait", reason=reason, dt_ms=round(dt * 1000.0, 1))
@@ -285,11 +295,13 @@ class TeleopController:
             return ControlFrame(state, self.target.copy(), False, reason, [])
 
         if not self._was_allowed:
-            # 使能上升沿：精确锚定当前实际 TCP 位姿，防止离合切入时姿态跳变。
-            self.target = state.position.copy()
-            self.cartesian_target = self.kin.forward(state.position[:6])
-            self.rate.reset(state.position)
-            self._rebase_input(state.position)
+            # 使能上升沿：沿用当前保持目标（若偏差过大则重同步），锚定手柄零跳变离合。
+            tracking_lag = float(np.max(np.abs(state.position[:6] - self.target[:6])))
+            hold = self.joints.clamp(state.position if tracking_lag > 0.25 else self.target)
+            self.target = hold
+            self.cartesian_target = self.kin.forward(hold[:6])
+            self.rate.reset(hold)
+            self._rebase_input(hold)
             self._log("gate_active", q_deg=np.rad2deg(state.position).round(2).tolist())
             self._was_allowed = True
 
@@ -308,7 +320,7 @@ class TeleopController:
                     and pose_reached(target, self.settings.home,
                                      arm_tolerance_rad=arm_tol, gripper_tolerance_rad=grip_tol)):
                 self.home_active = False
-                self._rebase_input(state.position)
+                self._rebase_input(target)
                 # HOME 后必须松开再重新按住，避免手柄在回 HOME 期间的位移突然生效。
                 self.gate.fault_latched = True
                 self._log("home_done", q_deg=np.rad2deg(state.position).round(2).tolist())

@@ -44,12 +44,13 @@ class JoyconRSTeleop(Teleoperator):
         self.input = None
         self.feedback = None
         self.last_valid_q = self.settings.home[:6].copy()
-        self.cartesian_target = self.kin.forward(self.settings.home[:6])
         self.gripper_target = self.settings.home[6]
+        self.cartesian_target = self.kin.forward(self.settings.home[:6])
         self.last_time = None
         self.home_active = False
         self.events = []
         self._was_allowed = False
+        self._initialized_hold = False
 
     @property
     def action_features(self):
@@ -81,6 +82,7 @@ class JoyconRSTeleop(Teleoperator):
                                  self.settings.gripper_limits[1], home_pose[3:])
         self.last_time = None
         self._was_allowed = False
+        self._initialized_hold = False
         self.gate.started = time.monotonic()
 
     def _sync_anchor(self, q: np.ndarray) -> None:
@@ -92,7 +94,7 @@ class JoyconRSTeleop(Teleoperator):
 
     def _workspace_ok(self, q: np.ndarray) -> bool:
         point = self.kin.forward(q)[:3, 3]
-        return workspace_contains(point, **self.settings.workspace_kwargs())
+        return workspace_contains(point, **self.settings.workspace_kwargs(), tol=5e-4)
 
     def _limit_attitude_step(self, target_rot: np.ndarray, dt: float) -> np.ndarray:
         max_rate = float(self.settings.section("joycon").get("imu_max_rate_rad_s", 1.5))
@@ -127,10 +129,12 @@ class JoyconRSTeleop(Teleoperator):
         if not np.isfinite(values).all():
             raise ValueError("非有限 RS 反馈")
         self.feedback = np.deg2rad(values)
-        if not self._was_allowed:
-            self.last_valid_q = self.feedback[:6].copy()
-            self.gripper_target = self.feedback[6]
-            self._sync_anchor(self.feedback[:6])
+        if not self._initialized_hold:
+            clamped = self.joints.clamp(self.feedback)
+            self.last_valid_q = clamped[:6].copy()
+            self.gripper_target = float(clamped[6])
+            self._sync_anchor(self.last_valid_q)
+            self._initialized_hold = True
 
     def get_action(self):
         if self.input is None or self.feedback is None:
@@ -147,15 +151,21 @@ class JoyconRSTeleop(Teleoperator):
         if not status.allowed:
             self.home_active = False
             self._was_allowed = False
-            self.last_valid_q = self.feedback[:6].copy()
-            self.gripper_target = self.feedback[6]
-            self._sync_anchor(self.feedback[:6])
+            # 待机保持指令目标（若外部推偏 >0.25 rad 才重同步），避免 PD 下垂越积越多。
+            if float(np.max(np.abs(self.feedback[:6] - self.last_valid_q))) > 0.25:
+                clamped = self.joints.clamp(self.feedback)
+                self.last_valid_q = clamped[:6].copy()
+                self.gripper_target = float(clamped[6])
+            self._sync_anchor(self.last_valid_q)
+            held = np.r_[self.last_valid_q, self.gripper_target]
             return {f"{name}.pos": math.degrees(value)
-                    for name, value in zip(JOINT_NAMES, self.feedback, strict=True)}
+                    for name, value in zip(JOINT_NAMES, held, strict=True)}
         if not self._was_allowed:
-            self.last_valid_q = self.feedback[:6].copy()
-            self.gripper_target = self.feedback[6]
-            self._sync_anchor(self.feedback[:6])
+            if float(np.max(np.abs(self.feedback[:6] - self.last_valid_q))) > 0.25:
+                clamped = self.joints.clamp(self.feedback)
+                self.last_valid_q = clamped[:6].copy()
+                self.gripper_target = float(clamped[6])
+            self._sync_anchor(self.last_valid_q)
             self._was_allowed = True
         if sample.home:
             self.home_active = True

@@ -42,8 +42,8 @@ safety:
   require_gripper_torque_feedback: true
   require_temperature_feedback: true
   home_timeout_s: 15.0
-  # 六轴与夹爪分开设定到位容差：六轴适应 MIT PD 重力静差，夹爪行程 345° 容差更合理。
-  home_tolerance_rad: 0.04
+  # 六轴与夹爪分开设定到位容差：六轴适应 MIT PD 伸展态重力静差（实测约 3.2°），夹爪行程 345° 容差更合理。
+  home_tolerance_rad: 0.08
   gripper_home_tolerance_rad: 0.15
 
 home:
