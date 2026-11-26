@@ -16,8 +16,8 @@ safety:
   # 夹爪第 7 路电机角度范围（rad）：RS 真机 0.0 为完全闭合、正方向为张开（对齐 teach_grasp.py 的 0..4.2 rad，上限 6.021 rad=345°）。
   # 乘以 joint_limit_scale=0.7 后安全张开端点约为 +4.215 rad（+241.5°）。修改后同时检查 home.gripper 是否落在该范围内。
   gripper_limits_rad: [0.0, 6.021385919]
-  max_joint_velocity_rad_s: [0.35, 0.35, 0.35, 0.45, 0.45, 0.55, 1.20]
-  max_joint_acceleration_rad_s2: [1.2, 1.2, 1.2, 1.8, 1.8, 2.0, 5.0]
+  max_joint_velocity_rad_s: [0.65, 0.65, 0.65, 0.85, 0.85, 1.00, 1.80]
+  max_joint_acceleration_rad_s2: [2.2, 2.2, 2.2, 3.0, 3.0, 3.5, 6.0]
   # 以肩关节中心 (0, 0, 0.145) 为圆心的安全工作空间（B601-RS 实际肩到末端展长约 0.83 m，默认取约 70%）。
   workspace_origin_xyz: [0.0, 0.0, 0.145]
   workspace_radius_m: 0.58
@@ -56,12 +56,12 @@ joycon:
   device: right
   map: config/joycon_map.json
   # 摇杆平移速度（m/s）与 X/B 纯 Z 轴升降速度（m/s）。
-  linear_speed_m_s: 0.14
-  vertical_speed_m_s: 0.10
+  linear_speed_m_s: 0.20
+  vertical_speed_m_s: 0.14
   stick_deadzone: 0.18
   position_scale: 1.0
   rotation_scale: 1.0
-  gripper_travel_time_s: 1.0
+  gripper_travel_time_s: 0.8
   # 摇杆 XY 符号 [前/后(+X), 左/右(+Y)]；手感反向时可单独改 -1.0。
   stick_axis_signs: [1.0, 1.0]
   # 体感姿态三轴符号 [roll, pitch, yaw]；已按右手法则对齐机器人坐标系，可按习惯微调。

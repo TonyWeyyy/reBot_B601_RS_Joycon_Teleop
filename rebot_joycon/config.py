@@ -180,6 +180,8 @@ class Settings:
             raise ValueError("控制频率必须在 10–100 Hz")
         if np.any(self.max_velocity <= 0) or np.any(self.max_acceleration <= 0):
             raise ValueError("速度和加速度限制必须为正数")
+        if np.any(self.max_velocity[:6] > 2.5) or self.max_velocity[6] > 3.5:
+            raise ValueError("关节最大速度超出安全上限（六轴 ≤ 2.5 rad/s，夹爪 ≤ 3.5 rad/s）")
 
         safety = self.section("safety")
         scale = _finite_scalar(safety.get("joint_limit_scale", 0.7),
@@ -288,11 +290,17 @@ class Settings:
             raise ValueError(f"未知后端：{backend}")
 
     def with_max_arm_velocity(self, value: float | None) -> None:
-        """CLI 使用的进程内覆盖；冻结 dataclass 不阻止修改嵌套配置。"""
+        """CLI 使用的进程内覆盖；可降低或按安全上限提高六轴最大速度（0.005–2.0 rad/s）。"""
         if value is None:
             return
-        if not math.isfinite(value) or not 0.005 <= value <= 1.0:
-            raise ValueError("--max-vel 必须在 0.005–1.0 rad/s")
+        if not math.isfinite(value) or not 0.005 <= value <= 2.0:
+            raise ValueError("--max-vel 必须在 0.005–2.0 rad/s")
         velocities = self.max_velocity.copy()
-        velocities[:6] = np.minimum(velocities[:6], value)
+        velocities[:6] = float(value)
+        accelerations = self.max_acceleration.copy()
+        # 提高速度上限时同步匹配制动加速度，避免高速下刹车距离过长。
+        accelerations[:6] = np.clip(
+            np.maximum(accelerations[:6], float(value) * 3.5), 0.1, 8.0,
+        )
         self.section("safety")["max_joint_velocity_rad_s"] = velocities.tolist()
+        self.section("safety")["max_joint_acceleration_rad_s2"] = accelerations.tolist()

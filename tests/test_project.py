@@ -1333,6 +1333,24 @@ class ProjectTests(unittest.TestCase):
         offset2 = run_cal(full_shake, [16.0, -31.0, -8.0])
         np.testing.assert_allclose(offset2, [16.0, -31.0, -8.0], atol=1e-6)
 
+    def test_65_max_vel_override_raises_and_bounds_and_safe_stop_stays_gentle(self):
+        from rebot_joycon.backends import _safe_return_duration
+
+        cfg = Settings(self.settings.root, copy.deepcopy(self.settings.raw), self.settings.path)
+        cfg.with_max_arm_velocity(1.5)
+        np.testing.assert_allclose(cfg.max_velocity[:6], [1.5] * 6)
+        self.assertGreaterEqual(float(np.min(cfg.max_acceleration[:6])), 5.0)
+        # 即便运行在高速 --max-vel 1.5/2.0，平滑回零时间仍受安全回零速度上限约束。
+        self.assertGreaterEqual(_safe_return_duration(np.array([1.5, 0, 0, 0, 0, 0, 0]), cfg.max_velocity), 4.0)
+
+        with self.assertRaisesRegex(ValueError, "0.005–2.0"):
+            cfg.with_max_arm_velocity(2.5)
+
+        raw = copy.deepcopy(self.settings.raw)
+        raw["safety"]["max_joint_velocity_rad_s"][0] = 3.0
+        with self.assertRaisesRegex(ValueError, "安全上限"):
+            Settings(self.settings.root, raw, self.settings.path).validate()
+
 
 if __name__ == "__main__":
     unittest.main()

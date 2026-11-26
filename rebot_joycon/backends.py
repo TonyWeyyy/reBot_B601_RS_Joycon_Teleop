@@ -15,6 +15,16 @@ from .errors import BackendUnavailable, SafetyError
 from .safety import pose_reached
 
 
+_SAFE_RETURN_SPEED_CAP = np.array([0.55, 0.55, 0.55, 0.65, 0.65, 0.75, 1.50], dtype=float)
+
+
+def _safe_return_duration(start: np.ndarray, max_velocity: np.ndarray) -> float:
+    """计算平滑回零时间：即使遥操作运行在高速，回零峰值速度仍限制在保守安全区间。"""
+    return_speeds = np.minimum(np.asarray(max_velocity, dtype=float), _SAFE_RETURN_SPEED_CAP)
+    peak_speeds = 1.5 * np.abs(np.asarray(start, dtype=float)) / np.maximum(return_speeds, 1e-6)
+    return max(3.0, float(np.max(peak_speeds)))
+
+
 def _prefer_environment_packages() -> None:
     """Put the active env's site-packages ahead of ~/.local .pth injections."""
     try:
@@ -278,10 +288,8 @@ class PosVelBackend(ArmBackend):
         arm_tol = min(float(safety.get("home_tolerance_rad", 0.08)), 0.05)
         grip_tol = float(safety.get("gripper_home_tolerance_rad", 0.15))
         start = self.read_state().position
-        # smoothstep peak speed is 1.5 * delta / duration; keep it within the
-        # same per-joint limits used by the teleoperation trajectory.
-        peak_speeds = 1.5 * np.abs(start) / self.settings.max_velocity
-        duration = max(3.0, float(np.max(peak_speeds)))
+        # smoothstep peak speed is 1.5 * delta / duration; cap return speeds conservatively.
+        duration = _safe_return_duration(start, self.settings.max_velocity)
         print(f"[安全停止] POS_VEL 平滑回零（预计 {duration:.1f}s）...", flush=True)
         began = time.monotonic()
         # smoothstep 轨迹，起止速度均为零。
@@ -501,8 +509,7 @@ class RebotMITBackend(ArmBackend):
         arm_tol = min(float(safety.get("home_tolerance_rad", 0.08)), 0.05)
         grip_tol = float(safety.get("gripper_home_tolerance_rad", 0.15))
         start = self.read_state().position.copy()
-        peak_speeds = 1.5 * np.abs(start) / self.settings.max_velocity
-        duration = max(3.0, float(np.max(peak_speeds)))
+        duration = _safe_return_duration(start, self.settings.max_velocity)
         print(f"[安全停止] MIT 平滑回零（预计 {duration:.1f}s）...", flush=True)
         began = time.monotonic()
         try:

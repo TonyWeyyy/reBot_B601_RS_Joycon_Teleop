@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backend", choices=("auto", "mit", "pos_vel"), default=None)
     parser.add_argument("--config", default=None)
     parser.add_argument("--max-vel", type=float, default=None,
-                        help="降低六轴最大速度(rad/s)，首次真机建议 0.05")
+                        help="覆盖六轴最大速度(rad/s，允许 0.005–2.0；首次真机建议 0.05)")
     parser.add_argument("--home-on-start", action="store_true",
                         help="显式要求启动后平滑回 HOME；默认保持当前姿态")
     parser.add_argument("--headless", action="store_true", help="不打开 MuJoCo 窗口")
